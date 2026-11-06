@@ -25,6 +25,7 @@ describe('dsh-sdk-minimal bundle', () => {
     ) as Array<{ insert?: Array<{ id?: string; inject?: string[]; name?: string; config?: Record<string, unknown>; disabled?: unknown }> }>
     expect(patches).toHaveLength(1)
     const rows = patches[0]?.insert ?? []
+    expect(rows.find(row => row.id === 'plugin-package-inventory-deepseek')?.config).toEqual({ enabled: false })
     expect(rows.map(row => [row.id, row.name])).toEqual([
       ['sdk-app-startup', '@deepseek-ai/dsh-sdk-app'],
       ['sdk-jsonrpc-server', '@deepseek-ai/dsh-sdk-jsonrpc-server'],

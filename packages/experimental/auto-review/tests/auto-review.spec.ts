@@ -131,6 +131,7 @@ function reasoningDecisionChunks(text: string): StreamChunk[] {
 async function harness(
   script: ReviewScript[],
   permissionConfig: NonNullable<Parameters<typeof PermissionPresetService.Config>[0]> = { presets: PRESETS, defaultPreset: 'workspace-write' },
+  autoConfig: Partial<AutoReview.Config> = {},
 ): Promise<{ ctx: Context; adapter: RecordingAdapter; auto: PluginFiber }> {
   const ctx = new Context()
   provideWorkingDirectoryFixture(ctx)
@@ -155,7 +156,7 @@ async function harness(
     yield (await ctx.plugin(ApprovalService, { policy: 'ask' })).dispose
     yield (await ctx.plugin(PermissionPresetService, permissionConfig)).dispose
     yield ctx.llm.registerAdapter(['review'], adapter)
-    auto = await ctx.plugin(AutoReview)
+    auto = await ctx.plugin(AutoReview, autoConfig)
     yield auto.dispose
   })
   if (auto === undefined) throw new Error('Auto fixture did not activate')
@@ -1463,17 +1464,40 @@ describe('out-of-process delegation boundary', () => {
 })
 
 describe('cancellation and integration teardown', () => {
+  it.each(['danger-full-access', 'unknown'])('rejects an unsafe or missing fallback %s before publishing Auto', async (fallbackPreset) => {
+    const { ctx, auto } = await harness([])
+    await auto.dispose()
+    await expect(ctx.plugin(AutoReview, { fallbackPreset })).rejects.toThrow()
+    expect(ctx.permissionPresets.names).not.toContain(AUTO_PRESET)
+  })
+
+  it('uses a custom confined fallback and refuses an approval-free fallback', async () => {
+    const { ctx, auto } = await harness([], {
+      presets: {
+        safe: { sandbox: 'read-only', approval: 'ask' },
+        unattended: { sandbox: 'workspace-write', approval: 'never' },
+      },
+      defaultPreset: 'safe',
+    }, { fallbackPreset: 'safe' })
+    const { session } = autoSession(ctx, 'custom-fallback')
+    await auto.dispose()
+    expect(ctx.permissionPresets.current(session)).toBe('safe')
+    await expect(ctx.plugin(AutoReview, { fallbackPreset: 'unattended' })).rejects.toThrow('require approval')
+    expect(ctx.permissionPresets.names).not.toContain(AUTO_PRESET)
+  })
+
   it('migrates live Auto Sessions when the integration restarts under an active root', async () => {
     const { ctx, auto } = await harness([])
     const { session } = autoSession(ctx, 'restart-auto')
+    setApprovalPolicy(session, 'never')
 
     await auto.restart()
 
     expect(ctx.root.fiber.state).toBe(FiberState.ACTIVE)
-    expect(ctx.permissionPresets.current(session)).toBe('danger-full-access')
+    expect(ctx.permissionPresets.current(session)).toBe('workspace-write')
     expect(ctx.permissionPresets.names).toContain(AUTO_PRESET)
     expect(session.snapshotEvents().filter(event => event.type === 'approval/policy').at(-1)?.data)
-      .toEqual({ policy: 'never' })
+      .toEqual({ policy: 'ask' })
   })
 
   it.each(['allow', 'deny', 'failure'] as const)(
@@ -1591,7 +1615,7 @@ describe('cancellation and integration teardown', () => {
   })
 
   it.each(['allow', 'deny', 'failure'] as const)(
-    'migrates live sessions to Full access and cancels a late lifecycle %s before removal',
+    'confines live sessions and cancels a late lifecycle %s before removal',
     async (outcome) => {
       const entered = Promise.withResolvers<undefined>()
       const release = Promise.withResolvers<undefined>()
@@ -1615,7 +1639,7 @@ describe('cancellation and integration teardown', () => {
 
       const disposal = auto.dispose()
       await until(() => adapter.requests[0]?.signal?.aborted === true)
-      expect(ctx.permissionPresets.current(session)).toBe('danger-full-access')
+      expect(ctx.permissionPresets.current(session)).toBe('workspace-write')
       expect(ctx.permissionPresets.names).toContain(AUTO_PRESET)
 
       const afterClose = await executeToolFixture(ctx, {
@@ -1625,14 +1649,14 @@ describe('cancellation and integration teardown', () => {
         arguments: {},
         agent,
       })
-      expect(afterClose).toMatchObject({ isError: false })
+      expect(afterClose).toMatchObject({ isError: true, error: { info: { code: TOOL_ABORTED_BEFORE_DISPATCH } } })
       expect(adapter.requests).toHaveLength(1)
 
       release.resolve(undefined)
       const result = await pending
       await disposal
 
-      expect(probe.runs()).toBe(1)
+      expect(probe.runs()).toBe(0)
       expect(result).toMatchObject({
         isError: true,
         error: { info: { name: 'AbortError', code: TOOL_ABORTED_BEFORE_DISPATCH } },
@@ -1656,7 +1680,7 @@ describe('cancellation and integration teardown', () => {
     let competingCall: ReturnType<typeof executeToolFixture> | undefined
     ctx.on('session/event', (session, event) => {
       if (session !== first.session || event.type !== 'permission/preset'
-        || event.data.preset !== 'danger-full-access') return
+        || event.data.preset !== 'workspace-write') return
       observedPreset = ctx.permissionPresets.current(second.session)
       try {
         ctx.permissionPresets.set(second.session, AUTO_PRESET)
@@ -1682,8 +1706,8 @@ describe('cancellation and integration teardown', () => {
     })
     expect(adapter.requests).toHaveLength(0)
     expect(probe.runs()).toBe(0)
-    expect(ctx.permissionPresets.current(first.session)).toBe('danger-full-access')
-    expect(ctx.permissionPresets.current(second.session)).toBe('danger-full-access')
+    expect(ctx.permissionPresets.current(first.session)).toBe('workspace-write')
+    expect(ctx.permissionPresets.current(second.session)).toBe('workspace-write')
     expect(ctx.permissionPresets.names).not.toContain(AUTO_PRESET)
   })
 
@@ -1711,8 +1735,8 @@ describe('cancellation and integration teardown', () => {
     await downstreamEntered.promise
 
     const disposal = auto.dispose()
-    await until(() => ctx.permissionPresets.current(session) === 'danger-full-access')
-    expect(ctx.permissionPresets.current(session)).toBe('danger-full-access')
+    await until(() => ctx.permissionPresets.current(session) === 'workspace-write')
+    expect(ctx.permissionPresets.current(session)).toBe('workspace-write')
     releaseDownstream.resolve(undefined)
 
     await expect(pending).resolves.toMatchObject({
@@ -1755,16 +1779,16 @@ describe('cancellation and integration teardown', () => {
     const { session } = autoSession(ctx, 'reinstall-after-dispose')
 
     await auto.dispose()
-    expect(ctx.permissionPresets.current(session)).toBe('danger-full-access')
+    expect(ctx.permissionPresets.current(session)).toBe('workspace-write')
     expect(ctx.permissionPresets.names).not.toContain(AUTO_PRESET)
 
     const reinstalled = await ctx.plugin(AutoReview)
     expect(ctx.permissionPresets.names).toContain(AUTO_PRESET)
-    expect(ctx.permissionPresets.current(session)).toBe('danger-full-access')
+    expect(ctx.permissionPresets.current(session)).toBe('workspace-write')
     await reinstalled.dispose()
   })
 
-  it('publishes Auto without validating the preset table at load', async () => {
+  it('publishes Auto with a safe fallback in the default preset table', async () => {
     const invalid = new Context()
     provideWorkingDirectoryFixture(invalid)
     contexts.push(invalid)

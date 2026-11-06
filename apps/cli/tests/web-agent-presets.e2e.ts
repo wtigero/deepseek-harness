@@ -36,6 +36,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 // Type-only: resolves `ctx.get('sessionProjections')` and `ctx.get('tokenMeter')`.
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-token-meter'
+import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 const { boot } = createRequire(import.meta.url)(join(REPO_ROOT, 'packages/boot/app-boot/lib/index.js')) as typeof import('@deepseek-ai/dsh-app-boot')
@@ -48,6 +49,7 @@ const CODEX_PACKAGE_DIR = join(REPO_ROOT, 'packages/subagent/subagent-codex')
 const CLAUDE_CODE_PACKAGE_DIR = join(REPO_ROOT, 'packages/subagent/subagent-claude-code')
 /** The installation anchor whose dependency surface the runtime resolution mirrors. */
 const INSTALL_ANCHOR = join(REPO_ROOT, 'apps/cli/package.json')
+const SHELL_TOOL = process.platform === 'win32' ? 'pwsh' : 'bash'
 const MINIMAL_PROMPT = 'You are a helpful software engineer assistant.'
 /** Deterministic model responses for the shipped minimal compaction path. */
 class MinimalCompactionAdapter extends LlmAdapter {
@@ -98,6 +100,14 @@ const MINIMAL_BASH_DESCRIPTION = `Run commands in a bash shell
 * To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.
 * Please avoid commands that may produce a very large amount of output.
 * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.`
+
+const MINIMAL_PWSH_DESCRIPTION = String.raw`Run commands in a PowerShell shell
+* When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
+* Network access depends on the task environment. Prefer configured mirrors/proxies when they are available.
+* State is persistent across command calls and discussions with the user.
+* Use native Windows paths (C:\...) and $env:NAME variables; this is PowerShell, not bash.
+* Please avoid commands that may produce a very large amount of output.
+* Please run long lived commands in the background, e.g. 'Start-Job' or start a server with Start-Process.`
 
 /**
  * Boot the shipped Web composition, minus the rows that would bind a port,
@@ -300,17 +310,43 @@ describe('the shipped Web composition', () => {
       // excluded for the reason the TUI composition e2e excludes them — they
       // depend on ripgrep being present on the machine.
       expect(toolNames(ctx, handle.agent).filter(name => name !== 'glob' && name !== 'grep')).toEqual([
-        'ask_user_question', 'bash', 'create_goal', 'edit', 'exit_plan_mode',
-        'get_goal', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'list_subagent_models', 'plugin_manager', 'present', 'read', 'read_image',
+        'ask_user_question', ...(process.platform === 'win32' ? [] : ['bash']), 'create_goal', 'edit', 'exit_plan_mode',
+        'get_goal', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'list_subagent_models', 'plugin_manager', 'present', ...(process.platform === 'win32' ? ['pwsh'] : []), 'read', 'read_image',
         'schedule_create', 'schedule_edit', 'schedule_list', 'schedule_view',
         'send_message', 'skill',
-        'subagent', 'subagent_fork', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'todo_write', 'update_goal', 'wait_agent', 'web_fetch', 'web_search',
+        'subagent', 'subagent_fork', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'todo_write', 'update_goal', 'wait_agent',
         'workflow', 'working_directory', 'write',
       ])
       expect(ctx.commands.find(handle.agent, 'goal')).toBeDefined()
     } finally {
       await handle.dispose()
     }
+  })
+
+  it('confines an Auto session when its Loader entry is disabled', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'web-auto-removal-'))
+    onTestFinished(() => rm(home, { recursive: true, force: true }))
+    const application = await bootWeb(home, [{ insert: [{
+      id: 'auto-review', name: '@deepseek-ai/dsh-experimental-auto-review',
+    }] }])
+    onTestFinished(() => application.fiber.dispose())
+    const handle = await application.agents.create({
+      sessionId: SessionId('loader-auto-removal'), meta: { cwd: home },
+      setup: agentCtx => application.agentPresets.mount(agentCtx, 'standard').then(() => undefined),
+    })
+    onTestFinished(() => handle.dispose())
+    const session = handle.agent.session
+    application.permissionPresets.set(session, 'auto')
+    setApprovalPolicy(session, 'never')
+    const entry = [...application.loader.entries()].find(row => row.options.id === 'auto-review')
+    if (entry === undefined) throw new Error('Auto review Loader entry is missing')
+    await entry.update({ disabled: true })
+    await application.loader.await()
+    expect(application.permissionPresets.current(session)).toBe('workspace-write')
+    expect(application.approval.overrideOf(session)).toBe('ask')
+    expect(application.permissionPresets.names).not.toContain('auto')
+    expect(session.snapshotEvents().filter(event => event.type === 'sandbox/mode').at(-1)?.data)
+      .toEqual({ mode: 'workspace-write' })
   })
 
   it('applies the default-off subagent model allowlist only to new sessions', async () => {
@@ -408,8 +444,8 @@ describe('the shipped Web composition', () => {
       expect(assembly.sections).toEqual([
         { name: 'deployment:persona-prefix', text: MINIMAL_PROMPT },
       ])
-      expect(assembly.tools.map(tool => tool.name)).toEqual(['bash', 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
-      expect(assembly.tools.find(tool => tool.name === 'bash')?.description).toBe(MINIMAL_BASH_DESCRIPTION)
+      expect(assembly.tools.map(tool => tool.name)).toEqual([SHELL_TOOL, 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
+      expect(assembly.tools.find(tool => tool.name === SHELL_TOOL)?.description).toBe(process.platform === 'win32' ? MINIMAL_PWSH_DESCRIPTION : MINIMAL_BASH_DESCRIPTION)
       expect(ctx.commands.find(handle.agent, 'goal')).toBeUndefined()
       // serviceFor reports preset-owned providers; unisolated consumers inherit the host fs.
       expect(ctx.agentPresets.serviceFor(handle.agent, 'fs')).toBeUndefined()
@@ -450,7 +486,7 @@ describe('the shipped Web composition', () => {
       if (image?.type !== 'image') throw new Error('minimal image read produced no durable image')
       expect((await ctx.attachments.readImage(image.attachment)).data.byteLength).toBe(image.attachment.bytes)
       expect(JSON.stringify(adapter.requests[1]?.messages)).toContain(image.attachment.attachmentId)
-      expect(adapter.requests[0]?.tools?.map(tool => tool.name)).toEqual(['bash', 'read_image', 'working_directory'])
+      expect(adapter.requests[0]?.tools?.map(tool => tool.name)).toEqual([SHELL_TOOL, 'read_image', 'working_directory'])
       expect(result?.data.meta).toMatchObject({ path: await realpath(join(cwd, 'red.png')) })
     } finally {
       await handle.dispose()
@@ -485,7 +521,7 @@ describe('the shipped Web composition', () => {
       const last = adapter.requests.at(-1)
       expect(last?.messages.flatMap(message => message.content)
         .some(block => block.type === 'text' && block.text.includes('Preserve the requested project task.'))).toBe(true)
-      expect(toolNames(ctx, handle.agent)).toEqual(['bash', 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
+      expect(toolNames(ctx, handle.agent)).toEqual([SHELL_TOOL, 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
     } finally {
       await handle.dispose()
     }
@@ -529,7 +565,7 @@ describe('the shipped Web composition', () => {
       setup: agentCtx => ctx.agentPresets.mount(agentCtx, 'minimal').then(() => undefined),
     })
     try {
-      expect(toolNames(ctx, minimal.agent)).toEqual(['bash', 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
+      expect(toolNames(ctx, minimal.agent)).toEqual([SHELL_TOOL, 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
       expect(toolNames(ctx, full.agent).length).toBeGreaterThan(10)
       expect(ctx.agentPresets.serviceFor(minimal.agent, 'compaction'))
         .not.toBe(ctx.agentPresets.serviceFor(full.agent, 'compaction'))
@@ -557,7 +593,7 @@ describe('the shipped Web composition', () => {
       for (const removed of ['cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine', 'cordis_inspect_self']) {
         expect(tools).not.toContain(removed)
       }
-      expect(tools).toEqual(expect.arrayContaining(['bash', 'read', 'edit', 'skill']))
+      expect(tools).toEqual(expect.arrayContaining([SHELL_TOOL, 'read', 'edit', 'skill']))
       expect(tools).not.toContain('str_replace_editor')
       expect(ctx.commands.find(handle.agent, 'goal')).toBeDefined()
 
@@ -607,12 +643,14 @@ describe('the shipped Web composition', () => {
       expect(ctx.commands.find(coded.agent, 'goal')).toBeDefined()
       const sdk = assembly.sections.find(section => section.name === 'tools:sdk')?.text ?? ''
       expect(sdk).not.toContain('str_replace_editor')
-      expect(sdk).toContain('web_search')
+      expect(sdk).toContain(`${SHELL_TOOL}:`)
+      expect(sdk).not.toContain('web_search:')
+      expect(sdk).not.toContain('web_fetch:')
 
       // The presentation is this agent's alone: the deployment default is
       // native, and the session composed from `standard` still sees it.
       const nativeAssembly = await ctx.systemPrompt.assemble({ scope: native.agent })
-      expect(nativeAssembly.tools.map(tool => tool.name)).toContain('bash')
+      expect(nativeAssembly.tools.map(tool => tool.name)).toContain(SHELL_TOOL)
       expect(nativeAssembly.tools.map(tool => tool.name)).not.toContain('run_code')
       expect(nativeAssembly.sections.some(section => section.name === 'tools:sdk')).toBe(false)
     } finally {
@@ -664,7 +702,7 @@ describe('the shipped Web composition', () => {
     try {
       // The host (global) view carries the deployment-level provider alone:
       // local discovery moved behind the presets with `skill-filesystem`.
-      expect((await ctx.skills.list({ cwd: proj })).map(skill => skill.name)).toEqual(['dsh-badge'])
+      expect((await ctx.skills.list({ cwd: proj })).map(skill => skill.name)).toEqual(process.platform === 'win32' ? ['diagnose-windows-sandbox-acl', 'dsh-badge'] : ['dsh-badge'])
 
       // The standard agent's view merges the global layer with its preset's
       // own local discovery over the session cwd.
@@ -697,7 +735,7 @@ describe('the shipped Web composition', () => {
       // stays the preset's choice — minimal mounts no `tool-skill`, so its
       // tool table has no loader even though the global layer is readable.
       expect((await ctx.skills.list({ scope: handle.agent })).map(skill => skill.name)).toContain('dsh-badge')
-      expect(toolNames(ctx, handle.agent)).toEqual(['bash', 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
+      expect(toolNames(ctx, handle.agent)).toEqual([SHELL_TOOL, 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
     } finally {
       await handle.dispose()
     }
@@ -893,7 +931,7 @@ describe('a user preset declared from the shipped cordis rows', () => {
         expect(queried.isError).toBe(false)
         // The tool catalog may exceed the inline budget; assert its complete stored text.
         const queriedText = spills.mock.calls.at(-1)?.[0].content ?? resultText(queried)
-        for (const toolName of ['bash', 'cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']) {
+        for (const toolName of [SHELL_TOOL, 'cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']) {
           expect(queriedText).toContain(`"name": "${toolName}"`)
         }
 
@@ -1022,7 +1060,7 @@ describe('a delegated child', () => {
       expect(toolNames(ctx, child.agent)).toEqual(toolNames(ctx, parent.agent))
       // The shipped `standard` preset is the whole coding agent; an empty
       // child here is the defect, and equality alone would not catch it.
-      expect(toolNames(ctx, child.agent)).toContain('bash')
+      expect(toolNames(ctx, child.agent)).toContain(SHELL_TOOL)
       expect(ctx.tools.schemas(child.agent)).toEqual(ctx.tools.schemas(parent.agent))
       const calls = [
         ['schedule_create', {
@@ -1087,7 +1125,7 @@ describe('the default preset as a user setting', () => {
       })
       try {
         // An omitted preset id resolves the stored default instead of the composed default.
-        expect(toolNames(ctx, handle.agent)).toEqual(['bash', 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
+        expect(toolNames(ctx, handle.agent)).toEqual([SHELL_TOOL, 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
       } finally {
         await handle.dispose()
       }
@@ -1133,7 +1171,7 @@ describe('a profile patch stored before Developer tools owned preset selection',
       setup: agentCtx => legacy.agentPresets.mount(agentCtx).then(() => undefined),
     })
     try {
-      expect(toolNames(legacy, handle.agent)).toEqual(['bash', 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
+      expect(toolNames(legacy, handle.agent)).toEqual([SHELL_TOOL, 'read_image', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update', 'working_directory'])
     } finally {
       await handle.dispose()
     }

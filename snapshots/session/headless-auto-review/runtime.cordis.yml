@@ -14,3 +14,9 @@
     - id: headless-auto-review-fixture
       name: '../../../packages/experimental/auto-review/tests/fixtures/headless-reviewer.ts'
       config: {}
+
+# This scenario exercises native file writes; platform shell schemas are pinned by shell scenarios.
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true

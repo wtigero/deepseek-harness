@@ -22,6 +22,8 @@
 
     - id: plugin-package-inventory-deepseek
       name: '@deepseek-ai/dsh-plugin-package-inventory-deepseek'
+      config:
+        enabled: false
 
     - id: llm-deepseek
       name: '@deepseek-ai/dsh-llm-deepseek-api-key'

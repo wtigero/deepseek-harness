@@ -17,6 +17,7 @@ declare module '@deepseek-ai/dsh-llm/types' {
 import type {} from '@deepseek-ai/dsh-tool-executor-ptc/types'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { FiberState, type Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-instructions'
 import {
@@ -151,6 +152,15 @@ interface ScopedPtcStart {
 export const name = 'experimental-auto-review'
 /** Complete host services required before Auto may be advertised. */
 export const inject = ['approval', 'llm', 'permissionPresets', 'sessions', 'tools', 'workingDirectory']
+
+/** Safe permission selection after live removal or reload of Auto review. */
+export interface Config {
+  /** Configured preset with confined writes and approval `ask`; defaults to `workspace-write`. */
+  fallbackPreset: string
+}
+
+/** Validate the configured fallback name before publishing Auto. */
+export const Config = z.object({ fallbackPreset: z.string().min(1).default('workspace-write') })
 
 /** Return JSON text for one immutable logged value. */
 function json(value: unknown): string {
@@ -729,10 +739,15 @@ function failed(exec: ToolExecution, error: unknown): PreToolDecision {
 }
 
 /** Install the Auto preset and its review gate; preserve Session selection on application shutdown. */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config): void {
   // Retain the injected service while this context drains on disposal.
   const permissionPresets = ctx.permissionPresets
+  const fallback = permissionPresets.resolve(config.fallbackPreset)
+  if (fallback.sandbox === 'danger-full-access' || fallback.approval !== 'ask') {
+    throw new Error('auto-review: fallbackPreset must confine file writes and require approval')
+  }
   let accepting = true
+  const retiringSessions = new Set<Session>()
   const active = new Set<Promise<void>>()
   const shownBySession = new WeakMap<Session, ShownSchemas>()
   const lifecycle = new AbortController()
@@ -740,6 +755,7 @@ export function apply(ctx: Context): void {
   ctx.effect(function* () {
     const stopListener = ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
       const agent = exec.agent
+      if (agent !== undefined && retiringSessions.has(agent.session)) return { kind: 'cancel' }
       if (agent === undefined || (exec.parent === undefined && exec.name === RUN_CODE_NAME)) {
         return next()
       }
@@ -791,7 +807,10 @@ export function apply(ctx: Context): void {
         if (ctx.root.fiber.state === FiberState.ACTIVE) {
           for (const session of ctx.sessions.list()) {
             if (permissionPresets.current(session) !== AUTO_PRESET) continue
-            permissionPresets.set(session, 'danger-full-access')
+            retiringSessions.add(session)
+          }
+          for (const session of retiringSessions) {
+            permissionPresets.set(session, config.fallbackPreset)
           }
         }
       } finally {

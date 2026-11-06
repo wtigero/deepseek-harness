@@ -84,6 +84,8 @@
 
     - id: plugin-package-inventory-deepseek
       name: '@deepseek-ai/dsh-plugin-package-inventory-deepseek'
+      config:
+        enabled: false
 
     # The transport-independent default for Agents created by entry points.
     # Settings may supply a saved selection; consumers read it at creation time.
@@ -202,7 +204,7 @@
     - id: otel
       name: '@deepseek-ai/dsh-otel'
 
-    # OTel releases a Session-log prefix only after explicit user feedback,
+    # OTel is disabled by default. When explicitly enabled in FEEDBACK_ONLY mode, it releases a Session-log prefix only after explicit user feedback,
     # regardless of model provider. Ordinary activity never triggers capture.
     # DSH_TELEMETRY_OTLP_URL overrides the production endpoint. A non-empty
     # DSH_TELEMETRY_DISABLED — any value, including '0'/'false' — opts the
@@ -218,7 +220,7 @@
     - id: session-telemetry-otel
       name: '@deepseek-ai/dsh-session-telemetry-otel'
       config:
-        mode: !!js process.env.DSH_TELEMETRY_MODE || 'FEEDBACK_ONLY'
+        mode: !!js process.env.DSH_TELEMETRY_MODE || 'DISABLED'
         shutdownTimeoutMillis: 3000
         maxRequestBytes: 4000000
         exporter:
@@ -459,8 +461,8 @@
         thresholds: [3, 5, 8]
         argumentsPreviewChars: 500
 
-    # The shared base enables the stable model-facing web_search and web_fetch
-    # tools. The Web app disables this host row and composes both tools per agent
+    # The shared base disables the model-facing web_search and web_fetch
+    # tools by default. The Web app disables this host row and composes both tools per agent
     # preset; products with a stricter network policy override tool-web. Search
     # defaults to the DeepSeek Search API (deepseek-search-api) and fetch to the
     # anonymous local fetcher (http). The DeepSeek Search and Fetch APIs
@@ -472,9 +474,8 @@
     # its own endpoint and key instead.
     # Legacy Messages search (deepseek-official) is selectable separately and
     # uses its own endpoint, with the account token or DEEPSEEK_API_KEY.
-    # Anonymous fetch accepts only public
-    # HTTP(S) destinations, resolves and validates every destination, and pins
-    # every actual connection. This composition gives web_search 60s whichever
+    # Anonymous fetch can reach loopback and private-network HTTP(S) destinations.
+    # This composition gives web_search 60s whichever
     # provider serves it; the provider-neutral tool default remains 30s. The Web
     # search provider and Web fetch provider
     # menus on the Web search and fetch settings page select a provider for each
@@ -499,7 +500,8 @@
     - id: tool-web
       name: '@deepseek-ai/dsh-tool-web'
       config:
-        fetch: true
+        search: false
+        fetch: false
         searchTimeoutMs: 60000
 
     - id: mcp-resources

@@ -52,6 +52,22 @@ function body(text = 'x'.repeat(300)) {
 }
 
 describe('incremental DeepSeek session-log upload', () => {
+  it('omits session logs by default and includes them after explicit opt-in', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(DeepSeekLlmApiExtensionRegistry)
+    const plugin = ctx.plugin(SessionLogDeepSeek)
+    await plugin
+    const session = ctx.sessions.create(SessionId('private-default'))
+    session.append('turn/start', { turn: 1 })
+    const request = { body: body(), signal: SIGNAL, sessionId: session.id }
+    expect((await ctx.deepseekLlmApiExtensions.prepare(request)).fields).not.toHaveProperty('dsh_session_log')
+    await plugin.dispose()
+    await ctx.plugin(SessionLogDeepSeek, { enabled: true })
+    expect((await ctx.deepseekLlmApiExtensions.prepare(request)).fields).toHaveProperty('dsh_session_log')
+  })
+
   it('publishes raw numeric sequence fields on its external wire DTO', () => {
     expectTypeOf<DeepSeekSessionLogExtension['sessionFormatVersion']>().toEqualTypeOf<number>()
     expectTypeOf<DeepSeekSessionLogExtension['afterSeq']>().toEqualTypeOf<number>()

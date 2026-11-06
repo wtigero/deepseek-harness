@@ -38,6 +38,12 @@ Under **Model catalog**, choose **Fetch available models** to ask the endpoint w
 
 Discovery reads the listing formats common gateways publish, but not every endpoint answers in one of them, so treat it as a convenience rather than a guarantee: when it fails or lists nothing, add the model ids by hand and they work just the same. A built-in provider is always answered from the installed catalog, even when its base URL points at a gateway, so fetch through a custom provider to see what the gateway really serves.
 
+### LM Studio on this computer
+
+Start the LM Studio local server and load a model. In **Settings → Models → Add model provider → Custom model API**, use provider ID `lmstudio`, base URL `http://127.0.0.1:1234/v1`, and **OpenAI Chat Completions**. Add the loaded model ID, or use **Fetch available models**. If the endpoint requires an API key, enter it; for an unauthenticated local server, the adapter may require a placeholder key. Save and select the model.
+
+A local model does not make the application offline. Plugins, commands, other providers, updates, and configured network tools can still access the network. Windows sandbox modes do not restrict network access or all reads. Use an isolated VM and enforce network access at the operating-system boundary for sensitive work.
+
 ## Select a model
 
 Configured providers appear in the model picker. Selecting a model also makes it the default for new sessions. A session that has already sent a request retains the model recorded in its own log.

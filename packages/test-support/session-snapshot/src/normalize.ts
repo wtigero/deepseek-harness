@@ -167,6 +167,36 @@ function replaceCwd(value: string, ctx: NormalizeContext, replacement: string): 
   return out
 }
 
+/** Normalize JSON-quoted paths only in system-authored working-directory context. */
+function normalizeRuntimeContextCwd(record: unknown, normalize: (path: string) => string): void {
+  if (record === null || typeof record !== 'object') return
+  const row = record as { type?: unknown; data?: unknown }
+  if (row.type !== 'user/message' || row.data === null || typeof row.data !== 'object') return
+  const data = row.data as { source?: { kind?: string; form?: string; sections?: unknown }; content?: unknown }
+  if (data.source?.kind !== 'runtime-context' || data.source.form !== 'snapshot') return
+  const sentence = (text: string): string => text.replace(
+    /^Current working directory: ("(?:[^"\\]|\\.)*")\.$/gm,
+    (_match, quoted: string) => `Current working directory: ${JSON.stringify(normalize(JSON.parse(quoted) as string))}.`,
+  )
+  if (!Array.isArray(data.source.sections)) return
+  const sections: unknown[] = data.source.sections
+  if (!sections.every((section): section is { name?: unknown; text: string } =>
+    section !== null && typeof section === 'object' && typeof (section as { text?: unknown }).text === 'string')) return
+  const texts = sections.map(section => section.text)
+  const normalized = sections.map((section) => {
+    if (section.name === 'working-directory:current') section.text = sentence(section.text)
+    return section.text
+  })
+  const original = texts.join('\n\n')
+  if (original.length > 0 && Array.isArray(data.content)) {
+    for (const block of data.content as ({ type?: unknown; text?: unknown } | null)[]) {
+      if (block?.type === 'text' && typeof block.text === 'string') {
+        block.text = block.text.replace(original, () => normalized.join('\n\n'))
+      }
+    }
+  }
+}
+
 /** Replace cwd, session ids, and any stray UUID with stable tokens in a string. */
 function scrubString(
   value: string,
@@ -289,7 +319,9 @@ export function tokenizeSessionFixtureCwd(rawLog: string): string {
   const ctx: NormalizeContext = { sessionIds: [], cwd }
   return lines.map((line) => {
     if (line.trim().length === 0) return line
-    return JSON.stringify(tokenizeFixtureValue(JSON.parse(line), ctx, basename))
+    const record = JSON.parse(line) as Record<string, unknown>
+    normalizeRuntimeContextCwd(record, path => tokenizeFixtureString(path, ctx, basename))
+    return JSON.stringify(tokenizeFixtureValue(record, ctx, basename))
   }).join('\n')
 }
 
@@ -356,6 +388,9 @@ export function normalizeSessionLog(
   const identityMode = options.identityMode ?? 'legacy'
   const lines = rawLog.split('\n').filter(line => line.trim().length > 0)
   const parsed = lines.map(line => JSON.parse(line) as Record<string, unknown>)
+  for (const record of parsed) {
+    normalizeRuntimeContextCwd(record, path => scrubString(path, ctx, cwdPathMode, identityMode))
+  }
   const jobTokens = new Map<string, string>()
   const reservedTokens = new Set(rawLog.match(/\{\{id:[1-9]\d*\}\}/g) ?? [])
   let nextJobToken = 1

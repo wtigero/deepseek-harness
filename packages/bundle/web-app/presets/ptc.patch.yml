@@ -120,7 +120,8 @@
           - id: tool-web
             name: '@deepseek-ai/dsh-tool-web'
             config:
-              fetch: true
+              search: false
+              fetch: false
               searchTimeoutMs: 60000
           - id: tool-executor-ptc
             name: '@deepseek-ai/dsh-tool-executor-ptc'

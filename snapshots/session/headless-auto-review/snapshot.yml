@@ -6,7 +6,5 @@ recording: authored
 header:
   class: headless-auto-review
   pin: true
-  systemPromptSource: text-turn
-  toolSchemasSource: text-turn
 workspace:
   final: true

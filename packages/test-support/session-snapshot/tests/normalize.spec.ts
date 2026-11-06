@@ -256,6 +256,39 @@ Additional instructions from: nested\AGENTS.md`,
 })
 
 describe('normalizeSessionLog', () => {
+  it.each(['canonical', 'native'] as const)('normalizes quoted Windows runtime cwd in %s mode without rewriting authored text', (cwdPathMode) => {
+    const cwd = String.raw`C:\temp\snapshot-root`
+    const path = `${cwd}\\selected`
+    const text = `Current working directory: ${JSON.stringify(path)}.`
+    const source = { kind: 'runtime-context', form: 'snapshot', sections: [
+      { name: 'working-directory:current', text },
+      { name: 'other', text },
+    ] }
+    const row = (type: string, rowSource: object) => ({ type, data: { source: rowSource, content: [{ type: 'text', text: rowSource === source ? `${text}\n\n${text}` : text }] } })
+    const input = [
+      { type: 'session', version: SESSION_FORMAT_VERSION, cwd },
+      row('user/message', source),
+      row('user/message', { kind: 'user' }),
+      row('tool/result', source),
+    ].map(record => JSON.stringify(record)).join('\n')
+    const context = { sessionIds: [], cwd }
+    type ContextRow = { data: { source: { sections: { text: string }[] }; content: { text: string }[] } }
+    const output = normalizeSessionLog(input, context, { cwdPathMode })
+    const rows = output.trim().split('\n').map(line => JSON.parse(line) as ContextRow)
+    const expected = `Current working directory: ${JSON.stringify(cwdPathMode === 'canonical' ? '{{cwd}}/selected' : '{{cwd}}\\selected')}.`
+    expect(rows[1]?.data.source.sections[0]?.text).toBe(expected)
+    expect(rows[1]?.data.content[0]?.text).toBe(`${expected}\n\n${text}`)
+    expect(rows[1]?.data.source.sections[1]?.text).toBe(text)
+    expect(rows[2]?.data.content[0]?.text).toBe(text)
+    expect(rows[3]?.data.content[0]?.text).toBe(`${text}\n\n${text}`)
+    expect(normalizeSessionLog(output, context, { cwdPathMode })).toBe(output)
+    const tokenized = tokenizeSessionFixtureCwd(input).split('\n').map(line => JSON.parse(line) as ContextRow)
+    expect(tokenized[1]?.data.source.sections[0]?.text)
+      .toBe(`Current working directory: ${JSON.stringify('{{cwd}}\\selected')}.`)
+    const changed = input.replace('Current working directory:', 'Different runtime context:')
+    expect(normalizeSessionLog(changed, context, { cwdPathMode })).not.toBe(output)
+  })
+
   it.each([
     { format: 'full UUIDs', ids: ['bash-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bash-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'] },
     { format: 'short UUIDs', ids: ['bash-aaaaaaaaaaaaaaaa', 'bash-bbbbbbbbbbbbbbbb'] },
